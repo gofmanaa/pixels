@@ -15,13 +15,10 @@ use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
 
-use crate::{
+use pixels::{
     filters::Filter,
     render::{RenderMode, YuvLut, blend, sample_bilinear, to_ascii},
 };
-
-mod filters;
-mod render;
 
 const PIXEL: &str = "▀";
 
