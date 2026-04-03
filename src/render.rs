@@ -31,18 +31,14 @@ pub fn luma(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Map a packed RGB pixel to an ASCII character + its fg Color.
-/// In ASCII mode we render a single char per cell (no half-block trick),
-/// coloured with the pixel's own RGB so the image stays recognisable.
 #[inline(always)]
 pub fn to_ascii(px: u32) -> (char, Color) {
     let r = ((px >> 16) & 0xFF) as u8;
     let g = ((px >> 8) & 0xFF) as u8;
     let b = (px & 0xFF) as u8;
     let y = luma(r, g, b) as usize;
-    //let idx = y * (ASCII_RAMP.len() - 1) / 255;
     let idx = (y * (ASCII_RAMP.len() - 1) / 255).min(ASCII_RAMP.len() - 1);
-    let ch = ASCII_RAMP[idx] as char;
-    (ch, Color::Rgb(r, g, b))
+    (ASCII_RAMP[idx] as char, Color::Rgb(r, g, b))
 }
 
 // LUT  (Y × U × V  →  packed RGB, filter-independent)

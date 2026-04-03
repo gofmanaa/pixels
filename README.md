@@ -1,63 +1,69 @@
+<img src="camera.png" align="center" style="max-width:100%;"/>
+
+
 # Rust Terminal Camera Viewer
 
-A high-performance terminal-based live camera viewer written in Rust using ratatui for rendering, v4l for camera capture, and rayon for parallel processing. Supports multiple render modes, color filters, and optional bilinear sampling for smoother output.
+A high-performance terminal-based live camera viewer written in Rust. It uses **Ratatui** for rendering, **v4l** for Linux camera capture.
 
-### Features
-- Half-block mode: Render camera feed using Unicode half-block `▀` characters for high-resolution terminal display.
-- ASCII mode: Map camera feed to ASCII characters while retaining color.
-- Filters: Apply real-time color filters (Normal, Grayscale, Inverted, etc.).
-- Bilinear Sampling: Toggle smooth interpolation with the s key (Anti-aliasing).
-- Screenshot (ANSI capture). Save the current frame with full terminal colors.
-- Keyboard controls:
-- - `q` - Quit
-- - `a` - Toggle render mode (Half-block ↔ ASCII)
-- - `s` - Toggle bilinear sampling
-- - `1..0` - Change active filter
-- - `p` - Save screenshot, save "image" to file frame_{ts}.ansi
-- - `Space` - Toggle pause
+## Features
 
+- **Multiple Render Modes**:
+  - **Half-block mode**: Uses Unicode half-block `▀` characters for high-resolution color display.
+  - **ASCII mode**: Maps camera feed to ASCII characters while retaining color.
+- **Real-time Filters**: Apply various color filters (Grayscale, Sepia, Invert, Vaporwave, etc.).
+- **Bilinear Sampling**: Smooth interpolation (Anti-aliasing) for better image quality.
+- **Screenshots**: Save the current frame as both an **ANSI-encoded text file** (preserving terminal colors) and a **PNG image**.
+- **Performance**: Parallel YUV to RGB decoding and rendering using Rayon.
+- **Clean UI**: Minimalist overlay with status information and a built-in help menu.
 
-### Dependencies
-`v4l` – Camera capture
-`ratatui` – Terminal UI rendering
-`rayon` – Parallel processing
-`color-eyre` – Error reporting
+## Prerequisites
 
-### Usege
+On Linux, you need `libv4l-dev` installed:
 
-```
-cargo run --release
-
-or 
-
-cargo run --release
+```bash
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install libv4l-dev
 ```
 
-### Screenshot Output
+## Installation & Usage
 
-Press `p` to save the current frame:
-```
-frame_1711829382.ansi
-```
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/gofmanaa/pixels.git
+   cd pixels
+   ```
 
-- Preserves full terminal colors
+2. Run the application:
+   ```bash
+   # Using default device (/dev/video0)
+   cargo run --release
 
-Can be viewed with:
+   # Specifying a different device
+   cargo run --release -- --device /dev/video1
+   ```
 
-```
-cat frame_*.ansi
-```
+## Keyboard Controls
 
-Or restored with color using:
-```
-less -R frame_*.ansi
-```
+| Key | Action |
+|-----|--------|
+| `q` | Quit application |
+| `a` | Toggle Render Mode (Half-block ↔ ASCII) |
+| `s` | Toggle Bilinear Sampling (Anti-aliasing) |
+| `p` | Save Screenshot (ANSI & PNG) |
+| `Space` | Toggle Pause/Live feed |
+| `c` | Toggle Stats Overlay |
+| `h` | Toggle Help Menu |
+| `1..0` | Switch between 10 different Color Filters |
+
+## Screenshots
+
+Press `p` to save the current frame. Files are named `frame_{timestamp}.ansi` and `frame_{timestamp}.png`.
+
+- **ANSI files** can be viewed with `cat` or `less -R`.
+- **PNG files** are standard images.
 
 
+## License
 
-### Notes
-High resolutions may require a large terminal buffer and might impact performance.
-
-Bilinear sampling provides smoother images but is slightly slower than nearest-neighbor.
-
-Screenshot files are ANSI-encoded, not PNG/JPEG
+This project is licensed under the MIT License.

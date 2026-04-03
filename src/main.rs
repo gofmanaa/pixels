@@ -3,16 +3,17 @@ use image::{ImageBuffer, Rgb};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use rayon::prelude::*;
 use std::{env, time::Duration};
+use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
-use v4l::{buffer::Type, io::traits::Stream};
 
 use crate::{
     filters::Filter,
@@ -22,96 +23,125 @@ use crate::{
 mod filters;
 mod render;
 
-fn main() -> Result<()> {
-    // Default device
-    let mut device_path = "/dev/video0".to_string();
-    // Parse CLI arguments
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--device" {
-            if let Some(val) = args.next() {
-                device_path = val;
-            } else {
-                eprintln!(
-                    "Warning: --device provided but no path, using default {}",
-                    device_path
-                );
-            }
+const PIXEL: &str = "▀";
+
+struct App {
+    stream: Option<UserptrStream>,
+    cam_w: u32,
+    cam_h: u32,
+    lut: YuvLut,
+    frame: Vec<u32>,
+    prev_frame: Vec<u32>,
+    filter: Filter,
+    mode: RenderMode,
+    is_sample_bilinear: bool,
+    pause: bool,
+    show_overlay: bool,
+    show_help: bool,
+    screenshot: bool,
+    quit: bool,
+    // Pre-allocated strings for ASCII mode to avoid per-frame allocations
+    ascii_strings: Vec<String>,
+    consecutive_skips: u32,
+}
+
+impl App {
+    fn new(stream: UserptrStream, cam_w: u32, cam_h: u32) -> Self {
+        let ascii_strings = (0..=255u8).map(|c| (c as char).to_string()).collect();
+
+        Self {
+            stream: Some(stream),
+            cam_w,
+            cam_h,
+            lut: YuvLut::build(),
+            frame: vec![0u32; (cam_w * cam_h) as usize],
+            prev_frame: vec![0u32; (cam_w * cam_h) as usize],
+            filter: Filter::Normal,
+            mode: RenderMode::HalfBlock,
+            is_sample_bilinear: false,
+            pause: false,
+            show_overlay: true,
+            show_help: false,
+            screenshot: false,
+            quit: false,
+            ascii_strings,
+            consecutive_skips: 0,
         }
     }
 
-    let dev = Device::with_path(device_path).expect("Failed to open device");
-    let (cam_w, cam_h) = init(&dev);
-    let mut stream = UserptrStream::with_buffers(&dev, Type::VideoCapture, 4)
-        .expect("Failed to create UserptrStream");
-    //let mut stream =
-    //    MmapStream::with_buffers(&dev, Type::VideoCapture, 4).expect("Failed to create MmapStream");
-
-    let lut = YuvLut::build();
-
-    let mut frame = vec![0u32; (cam_w * cam_h) as usize];
-    let mut prev_frame = vec![0u32; (cam_w * cam_h) as usize];
-
-    color_eyre::install()?;
-    let mut terminal = ratatui::init();
-
-    // Pre-allocate render buffers, reused every frame
-    let mut lines: Vec<Line> = Vec::with_capacity(256);
-
-    // user config
-    let mut filter = Filter::Normal;
-    let mut mode = RenderMode::HalfBlock;
-    let mut is_sample_bilinear = false;
-    let mut pause = false;
-    let mut screenshot = false;
-    let mut quit = false;
-
-    while !quit {
-        let active_filter = filter;
-        let active_mode = mode;
-
-        if !pause {
-            if let Some(buf) = next_frame_safe(&mut stream)? {
-                // Parallel YUYV -> packed RGB decode across all pixel pairs simultaneously
-                frame
-                    .par_chunks_mut(2)
-                    .zip(buf.par_chunks_exact(4_usize))
-                    .for_each(|(out, chunk)| {
-                        let y0 = chunk[0];
-                        let u = chunk[1];
-                        let y1 = chunk[2];
-                        let v = chunk[3];
-                        out[0] = lut.lookup(y0, u, v);
-                        out[1] = lut.lookup(y1, u, v);
-                    });
-                if is_sample_bilinear {
-                    for i in 0..frame.len() {
-                        frame[i] = blend(prev_frame[i], frame[i], 0.6);
-                    }
-                    prev_frame.copy_from_slice(&frame);
-                }
-            } else {
-                // reinit stream
-                drop(stream);
-                stream = UserptrStream::with_buffers(&dev, Type::VideoCapture, 4)
-                    .expect("Failed to create UserptrStream");
-            }
+    fn update(&mut self, dev: &Device) -> Result<()> {
+        if self.pause {
+            return Ok(());
         }
 
+        // Only try to get a frame if we have a stream
+        if let Some(stream) = self.stream.as_mut() {
+            match next_frame_safe(stream) {
+                Ok(Some(buf)) => {
+                    self.consecutive_skips = 0;
+                    let frame = &mut self.frame;
+                    let lut = &self.lut;
+
+                    // Parallel YUYV -> packed RGB decode
+                    frame
+                        .par_chunks_mut(2)
+                        .zip(buf.par_chunks_exact(4_usize))
+                        .for_each(|(out, chunk)| {
+                            out[0] = lut.lookup(chunk[0], chunk[1], chunk[3]);
+                            out[1] = lut.lookup(chunk[2], chunk[1], chunk[3]);
+                        });
+
+                    if self.is_sample_bilinear {
+                        for i in 0..frame.len() {
+                            frame[i] = blend(self.prev_frame[i], frame[i], 0.6);
+                        }
+                        self.prev_frame.copy_from_slice(frame);
+                    }
+                }
+                Ok(None) => {
+                    // Transient error (e.g. resize), just skip this frame
+                    self.consecutive_skips += 1;
+                    if self.consecutive_skips > 30 {
+                        // Re-init after too many skips
+                        self.stream.take(); // Ensure old stream is dropped
+                        self.stream =
+                            Some(UserptrStream::with_buffers(dev, Type::VideoCapture, 4)?);
+                        self.consecutive_skips = 0;
+                    }
+                }
+                Err(_) => {
+                    // Hard error, reinit stream
+                    self.stream.take(); // Ensure old stream is dropped
+                    self.stream = Some(UserptrStream::with_buffers(dev, Type::VideoCapture, 4)?);
+                    self.consecutive_skips = 0;
+                }
+            }
+        } else {
+            // No stream? Try to create one
+            self.stream.take(); // Ensure old stream is dropped
+            self.stream = Some(UserptrStream::with_buffers(dev, Type::VideoCapture, 4)?);
+            self.consecutive_skips = 0;
+        }
+        Ok(())
+    }
+
+    fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         terminal.draw(|f| {
-            let size = f.area();
-            let term_w = size.width as usize;
-            let term_h = size.height as usize;
-            let cam_hu = cam_h as usize;
-            let cam_wu = cam_w as usize;
+            let area = f.area();
+            if area.width == 0 || area.height == 0 {
+                return;
+            }
 
-            let scale_x = cam_wu as f32 / term_w.max(1) as f32;
+            let term_w = area.width as usize;
+            let term_h = area.height as usize;
+            let cam_w = self.cam_w as usize;
+            let cam_h = self.cam_h as usize;
 
-            let new_lines: Vec<Line> = match active_mode {
-                // Half-block mode
+            let scale_x = cam_w as f32 / term_w as f32;
+
+            let lines: Vec<Line> = match self.mode {
                 RenderMode::HalfBlock => {
-                    let scale_y = cam_hu as f32 / (term_h * 2).max(1) as f32;
-
+                    let scale_y = cam_h as f32 / (term_h * 2) as f32;
                     (0..term_h)
                         .into_par_iter()
                         .map(|ty| {
@@ -120,27 +150,24 @@ fn main() -> Result<()> {
                                     let fx = tx as f32 * scale_x;
                                     let fy1 = (ty * 2) as f32 * scale_y;
                                     let fy2 = (ty * 2 + 1) as f32 * scale_y;
-                                    let (p1, p2) = if is_sample_bilinear {
+
+                                    let (p1, p2) = if self.is_sample_bilinear {
                                         (
-                                            sample_bilinear(&frame, cam_wu, cam_hu, fx, fy1),
-                                            sample_bilinear(&frame, cam_wu, cam_hu, fx, fy2),
+                                            sample_bilinear(&self.frame, cam_w, cam_h, fx, fy1),
+                                            sample_bilinear(&self.frame, cam_w, cam_h, fx, fy2),
                                         )
                                     } else {
-                                        // Nearest-neighbor: cast to usize and clamp to frame bounds
-                                        let cx = fx as usize;
-                                        let cy1 = fy1 as usize;
-                                        let cy2 = fy2 as usize;
-
-                                        let cx = cx.min(cam_wu - 1);
-                                        let cy1 = cy1.min(cam_hu - 1);
-                                        let cy2 = cy2.min(cam_hu - 1);
-
-                                        (frame[cy1 * cam_wu + cx], frame[cy2 * cam_wu + cx])
+                                        let cx = (fx as usize).min(cam_w - 1);
+                                        let cy1 = (fy1 as usize).min(cam_h - 1);
+                                        let cy2 = (fy2 as usize).min(cam_h - 1);
+                                        (self.frame[cy1 * cam_w + cx], self.frame[cy2 * cam_w + cx])
                                     };
-                                    let p1 = active_filter.apply(p1, ty * 2);
-                                    let p2 = active_filter.apply(p2, ty * 2 + 1);
+
+                                    let p1 = self.filter.apply(p1, ty * 2);
+                                    let p2 = self.filter.apply(p2, ty * 2 + 1);
+
                                     Span::styled(
-                                        "▀",
+                                        PIXEL,
                                         Style::default()
                                             .fg(Color::Rgb(
                                                 ((p1 >> 16) & 0xFF) as u8,
@@ -159,14 +186,8 @@ fn main() -> Result<()> {
                         })
                         .collect()
                 }
-
-                // ASCII mode
-                // One camera pixel → one terminal cell.
-                // Filters still apply; luma drives the ramp character;
-                // original (filtered) colour tints the character.
                 RenderMode::Ascii => {
-                    let scale_y = cam_hu as f32 / term_h.max(1) as f32;
-
+                    let scale_y = cam_h as f32 / term_h as f32;
                     (0..term_h)
                         .into_par_iter()
                         .map(|ty| {
@@ -174,19 +195,19 @@ fn main() -> Result<()> {
                                 .map(|tx| {
                                     let fx = tx as f32 * scale_x;
                                     let fy = ty as f32 * scale_y;
-                                    let px = if is_sample_bilinear {
-                                        sample_bilinear(&frame, cam_wu, cam_hu, fx, fy)
+                                    let px = if self.is_sample_bilinear {
+                                        sample_bilinear(&self.frame, cam_w, cam_h, fx, fy)
                                     } else {
-                                        let ix = (fx as usize).min(cam_wu - 1);
-                                        let iy = (fy as usize).min(cam_hu - 1);
-                                        frame[iy * cam_wu + ix]
+                                        let ix = (fx as usize).min(cam_w - 1);
+                                        let iy = (fy as usize).min(cam_h - 1);
+                                        self.frame[iy * cam_w + ix]
                                     };
 
-                                    let px = active_filter.apply(px, ty);
+                                    let px = self.filter.apply(px, ty);
                                     let (ch, fg) = to_ascii(px);
+                                    // Use pre-allocated string
                                     Span::styled(
-                                        // We need an owned String for each unique char
-                                        ch.to_string(),
+                                        &self.ascii_strings[ch as usize],
                                         Style::default().fg(fg),
                                     )
                                 })
@@ -197,62 +218,125 @@ fn main() -> Result<()> {
                 }
             };
 
-            lines.clear();
-            lines.extend(new_lines);
-            if screenshot {
-                save_frame_ansi(&lines).expect("Failed to save screenshot ansi");
-                save_png(&frame, cam_wu, cam_hu).expect("Failed to save screensho png");
-                screenshot = false;
+            if self.screenshot {
+                save_frame_ansi(&lines).expect("Failed to save ANSI screenshot");
+                save_png(&self.frame, cam_w, cam_h).expect("Failed to save PNG screenshot");
+                self.screenshot = false;
             }
-            // Overlay: filter name in top-left corner, one Paragraph on top of another
-            let label = format!(
-                " {} │ {} │ AA:{} │ {} │ q quit ",
-                active_mode.label(),
-                active_filter.name(),
-                is_sample_bilinear,
-                if pause { "PAUSED" } else { "LIVE" }
-            );
-            let label_w = label.len() as u16;
 
-            use ratatui::layout::Rect;
-            use ratatui::widgets::Clear;
-            f.render_widget(Paragraph::new(lines.clone()), size);
-            let badge = Rect {
-                x: 1,
-                y: 0,
-                width: label_w,
-                height: 1,
-            };
-            f.render_widget(Clear, badge);
-            f.render_widget(
-                Paragraph::new(label.as_str())
-                    .style(Style::default().fg(Color::Green).bg(Color::Black)),
-                badge,
-            );
+            f.render_widget(Paragraph::new(lines), area);
+
+            if self.show_overlay {
+                let label = format!(
+                    " {} │ {} │ AA:{} │ {} │ 'h' help ",
+                    self.mode.label(),
+                    self.filter.name(),
+                    if self.is_sample_bilinear { "ON" } else { "OFF" },
+                    if self.pause { "PAUSED" } else { "LIVE" }
+                );
+                let badge = Rect {
+                    x: 1,
+                    y: 0,
+                    width: label.len() as u16,
+                    height: 1,
+                };
+                let badge = badge.intersection(area);
+                f.render_widget(Clear, badge);
+                f.render_widget(
+                    Paragraph::new(label).style(Style::default().fg(Color::Green).bg(Color::Black)),
+                    badge,
+                );
+            }
+
+            if self.show_help {
+                let help_text = vec![
+                    Line::from(" Keyboard Controls "),
+                    Line::from("-------------------"),
+                    Line::from(" q      : Quit"),
+                    Line::from(" a      : Toggle Render Mode (RGB/ASCII)"),
+                    Line::from(" s      : Toggle Bilinear Anti-aliasing"),
+                    Line::from(" p      : Save Screenshot (ANSI & PNG)"),
+                    Line::from(" Space  : Toggle Pause"),
+                    Line::from(" c      : Toggle Overlay"),
+                    Line::from(" h      : Toggle Help Menu"),
+                    Line::from(" 0-9    : Change Filter"),
+                ];
+                let help_width = 40;
+                let help_height = help_text.len() as u16 + 2;
+                let help_area = Rect {
+                    x: (area.width.saturating_sub(help_width)) / 2,
+                    y: (area.height.saturating_sub(help_height)) / 2,
+                    width: help_width,
+                    height: help_height,
+                };
+                let help_area = help_area.intersection(area);
+                f.render_widget(Clear, help_area);
+                f.render_widget(
+                    Paragraph::new(help_text)
+                        .block(Block::default().borders(Borders::ALL).title(" Help "))
+                        .style(Style::default().fg(Color::White).bg(Color::Black)),
+                    help_area,
+                );
+            }
         })?;
+        Ok(())
+    }
 
+    fn handle_events(&mut self) -> Result<()> {
         while event::poll(Duration::from_millis(0))? {
-            match handle_input(
-                &mut terminal,
-                filter,
-                mode,
-                is_sample_bilinear,
-                pause,
-                screenshot,
-            )? {
-                (true, _, _, _, _, _) => {
-                    quit = true;
-                    break; // quit
-                }
-                (false, next_filter, next_mode, next_sample, next_pause, next_screenshot) => {
-                    filter = next_filter;
-                    mode = next_mode;
-                    is_sample_bilinear = next_sample;
-                    pause = next_pause;
-                    screenshot = next_screenshot;
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') => self.quit = true,
+                    KeyCode::Char('a') => {
+                        self.mode = match self.mode {
+                            RenderMode::HalfBlock => RenderMode::Ascii,
+                            RenderMode::Ascii => RenderMode::HalfBlock,
+                        };
+                    }
+                    KeyCode::Char('s') => self.is_sample_bilinear = !self.is_sample_bilinear,
+                    KeyCode::Char('p') => self.screenshot = true,
+                    KeyCode::Char(' ') => self.pause = !self.pause,
+                    KeyCode::Char('c') => self.show_overlay = !self.show_overlay,
+                    KeyCode::Char('h') => self.show_help = !self.show_help,
+                    KeyCode::Char(c) => {
+                        if let Some(f) = Filter::from_key(c) {
+                            self.filter = f;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
+        Ok(())
+    }
+}
+
+fn main() -> Result<()> {
+    color_eyre::install()?;
+
+    let mut device_path = "/dev/video0".to_string();
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--device" {
+            if let Some(val) = args.next() {
+                device_path = val;
+            }
+        }
+    }
+
+    let dev = Device::with_path(device_path).expect("Failed to open device");
+    let (cam_w, cam_h) = init(&dev);
+
+    let stream = UserptrStream::with_buffers(&dev, Type::VideoCapture, 4)
+        .expect("Failed to create UserptrStream");
+
+    let mut terminal = ratatui::init();
+    let mut app = App::new(stream, cam_w, cam_h);
+
+    while !app.quit {
+        app.update(&dev)?;
+        app.draw(&mut terminal)?;
+        app.handle_events()?;
     }
 
     ratatui::restore();
@@ -266,68 +350,15 @@ fn init(dev: &Device) -> (u32, u32) {
     (format.width, format.height)
 }
 
-// TODO refactor
-fn handle_input(
-    terminal: &mut DefaultTerminal,
-    filter: Filter,
-    mode: RenderMode,
-    sample_bilinear: bool,
-    pause: bool,
-    screenshot: bool,
-) -> Result<(bool, Filter, RenderMode, bool, bool, bool)> {
-    match event::read()? {
-        Event::Key(key) => {
-            match key.code {
-                KeyCode::Char('q') => {
-                    return Ok((true, filter, mode, sample_bilinear, pause, screenshot));
-                }
-                KeyCode::Char('a') => {
-                    let next = match mode {
-                        RenderMode::HalfBlock => RenderMode::Ascii,
-                        RenderMode::Ascii => RenderMode::HalfBlock,
-                    };
-                    return Ok((false, filter, next, sample_bilinear, pause, screenshot));
-                }
-                KeyCode::Char('s') => {
-                    // Toggle sample_bilinear
-                    return Ok((false, filter, mode, !sample_bilinear, pause, screenshot));
-                }
-                KeyCode::Char('p') => {
-                    return Ok((false, filter, mode, sample_bilinear, pause, !screenshot));
-                }
-                KeyCode::Char(' ') => {
-                    // Toggle pause
-                    return Ok((false, filter, mode, sample_bilinear, !pause, screenshot));
-                }
-                KeyCode::Char(c) => {
-                    if let Some(f) = Filter::from_key(c) {
-                        return Ok((false, f, mode, sample_bilinear, pause, screenshot));
-                    }
-                }
-                _ => {}
-            }
-        }
-        Event::Resize(_w, _h) => terminal.autoresize()?, // works via mutable borrow
-        _ => (),
-    }
-    return Ok((false, filter, mode, sample_bilinear, pause, screenshot));
-}
-
-/// Works for any V4L stream implementing CaptureStream (MmapStream, UserptrStream, etc.)
 fn next_frame_safe<'a, S>(stream: &'a mut S) -> Result<Option<Vec<u8>>>
 where
     S: CaptureStream<'a>,
     S::Item: AsRef<[u8]>,
 {
     match stream.next() {
-        Ok((buf, _meta)) => Ok(Some(buf.as_ref().to_vec())), // convert to Vec<u8>
+        Ok((buf, _meta)) => Ok(Some(buf.as_ref().to_vec())),
         Err(e) => match e.raw_os_error() {
-            Some(4) => Ok(None), // EINTR
-            Some(22) => {
-                // EINVAL
-                eprintln!("Warning: frame skipped due to EINVAL (terminal resize)");
-                Ok(None)
-            }
+            Some(4) | Some(22) => Ok(None), // EINTR or EINVAL (resize)
             _ => Err(e.into()),
         },
     }
@@ -340,54 +371,40 @@ fn save_frame_ansi(lines: &[Line]) -> Result<()> {
 
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let filename = format!("frame_{ts}.ansi");
-
     let mut file = File::create(&filename)?;
 
     for line in lines {
-        for span in line.spans.iter() {
+        for span in &line.spans {
             let style = span.style;
-
-            if let Some(fg) = style.fg {
-                if let Color::Rgb(r, g, b) = fg {
-                    write!(file, "\x1b[38;2;{};{};{}m", r, g, b)?;
-                }
+            if let Some(Color::Rgb(r, g, b)) = style.fg {
+                write!(file, "\x1b[38;2;{};{};{}m", r, g, b)?;
             }
-
-            if let Some(bg) = style.bg {
-                if let Color::Rgb(r, g, b) = bg {
-                    write!(file, "\x1b[48;2;{};{};{}m", r, g, b)?;
-                }
+            if let Some(Color::Rgb(r, g, b)) = style.bg {
+                write!(file, "\x1b[48;2;{};{};{}m", r, g, b)?;
             }
-
             write!(file, "{}", span.content)?;
             write!(file, "\x1b[0m")?;
         }
         writeln!(file)?;
     }
-
     Ok(())
 }
 
 fn save_png(frame: &[u32], width: usize, height: usize) -> Result<()> {
     let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width as u32, height as u32);
-
     for (i, pixel) in frame.iter().enumerate() {
         let x = (i % width) as u32;
         let y = (i / width) as u32;
-
         let r = ((pixel >> 16) & 0xFF) as u8;
         let g = ((pixel >> 8) & 0xFF) as u8;
         let b = (pixel & 0xFF) as u8;
-
         img.put_pixel(x, y, Rgb([r, g, b]));
     }
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-
     let filename = format!("frame_{ts}.png");
     img.save(&filename)?;
-
     Ok(())
 }
