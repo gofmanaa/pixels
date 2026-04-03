@@ -92,9 +92,12 @@ impl App {
                         });
 
                     if self.is_sample_bilinear {
-                        for (curr, prev) in frame.iter_mut().zip(self.prev_frame.iter()) {
-                            *curr = blend(*prev, *curr, 0.6);
-                        }
+                        frame
+                            .par_iter_mut()
+                            .zip(self.prev_frame.par_iter())
+                            .for_each(|(curr, prev)| {
+                                *curr = blend(*prev, *curr, 0.6);
+                            });
                         self.prev_frame.copy_from_slice(frame);
                     }
                 }
