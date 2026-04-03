@@ -93,7 +93,7 @@ impl Filter {
             }
 
             Self::Scanlines => {
-                if row % 2 == 0 {
+                if row.is_multiple_of(2) {
                     (r, g, b)
                 } else {
                     (r / 2, g / 2, b / 2)

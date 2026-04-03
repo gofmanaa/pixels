@@ -92,8 +92,8 @@ impl App {
                         });
 
                     if self.is_sample_bilinear {
-                        for i in 0..frame.len() {
-                            frame[i] = blend(self.prev_frame[i], frame[i], 0.6);
+                        for (curr, prev) in frame.iter_mut().zip(self.prev_frame.iter()) {
+                            *curr = blend(*prev, *curr, 0.6);
                         }
                         self.prev_frame.copy_from_slice(frame);
                     }
@@ -316,12 +316,12 @@ fn main() -> Result<()> {
 
     let mut device_path = "/dev/video0".to_string();
     let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--device" {
+    while let Some(arg) = args.next()
+        && arg == "--device" {
             if let Some(val) = args.next() {
                 device_path = val;
             }
-        }
+
     }
 
     let dev = Device::with_path(device_path).expect("Failed to open device");
