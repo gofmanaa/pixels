@@ -320,11 +320,11 @@ fn main() -> Result<()> {
     let mut device_path = "/dev/video0".to_string();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next()
-        && arg == "--device" {
-            if let Some(val) = args.next() {
-                device_path = val;
-            }
-
+        && arg == "--device"
+    {
+        if let Some(val) = args.next() {
+            device_path = val;
+        }
     }
 
     let dev = Device::with_path(device_path).expect("Failed to open device");
