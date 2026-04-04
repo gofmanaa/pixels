@@ -20,7 +20,7 @@ use pixels::{
     render::{RenderMode, YuvLut, blend, sample_bilinear, to_ascii},
 };
 
-const PIXEL: &str = "▀";
+const PIXEL: &str = " ";
 
 struct App {
     stream: Option<UserptrStream>,
@@ -146,6 +146,7 @@ impl App {
                         .into_par_iter()
                         .map(|ty| {
                             let spans: Vec<Span> = (0..term_w)
+                                .rev()
                                 .map(|tx| {
                                     let fx = tx as f32 * scale_x;
                                     let fy1 = (ty * 2) as f32 * scale_y;
