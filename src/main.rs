@@ -1,4 +1,6 @@
+use clap::Parser;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
 use image::{ImageBuffer, Rgb};
 use ratatui::{
     DefaultTerminal,
@@ -9,8 +11,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use rayon::prelude::*;
-use std::{env, time::Duration};
+use std::path::PathBuf;
+use std::time::Duration;
 use v4l::buffer::Type;
+use v4l::io::mmap::Stream;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
@@ -20,10 +24,10 @@ use pixels::{
     render::{RenderMode, YuvLut, blend, sample_bilinear, to_ascii},
 };
 
-const PIXEL: &str = " ";
+const PIXEL: &str = "▀";
 
-struct App {
-    stream: Option<UserptrStream>,
+struct App<'a> {
+    stream: Option<MmapStream<'a>>,
     cam_w: u32,
     cam_h: u32,
     lut: YuvLut,
@@ -42,8 +46,8 @@ struct App {
     consecutive_skips: u32,
 }
 
-impl App {
-    fn new(stream: UserptrStream, cam_w: u32, cam_h: u32) -> Self {
+impl<'a> App<'a> {
+    fn new(stream: Stream<'a>, cam_w: u32, cam_h: u32) -> Self {
         let ascii_strings = (0..=255u8).map(|c| (c as char).to_string()).collect();
 
         Self {
@@ -104,22 +108,21 @@ impl App {
                     if self.consecutive_skips > 30 {
                         // Re-init after too many skips
                         self.stream.take(); // Ensure old stream is dropped
-                        self.stream =
-                            Some(UserptrStream::with_buffers(dev, Type::VideoCapture, 4)?);
+                        self.stream = Some(MmapStream::with_buffers(dev, Type::VideoCapture, 4)?);
                         self.consecutive_skips = 0;
                     }
                 }
                 Err(_) => {
                     // Hard error, reinit stream
                     self.stream.take(); // Ensure old stream is dropped
-                    self.stream = Some(UserptrStream::with_buffers(dev, Type::VideoCapture, 4)?);
+                    self.stream = Some(MmapStream::with_buffers(dev, Type::VideoCapture, 4)?);
                     self.consecutive_skips = 0;
                 }
             }
         } else {
             // No stream? Try to create one
             self.stream.take(); // Ensure old stream is dropped
-            self.stream = Some(UserptrStream::with_buffers(dev, Type::VideoCapture, 4)?);
+            self.stream = Some(MmapStream::with_buffers(dev, Type::VideoCapture, 4)?);
             self.consecutive_skips = 0;
         }
         Ok(())
@@ -312,24 +315,28 @@ impl App {
     }
 }
 
+#[derive(Debug, Parser)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[clap(short, long)]
+    device: PathBuf,
+}
+
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let mut device_path = "/dev/video0".to_string();
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next()
-        && arg == "--device"
-    {
-        if let Some(val) = args.next() {
-            device_path = val;
-        }
-    }
+    let args = Args::parse();
 
-    let dev = Device::with_path(device_path).expect("Failed to open device");
-    let (cam_w, cam_h) = init(&dev);
+    let dev = Device::with_path(&args.device)
+        .wrap_err_with(|| format!("Cannot open device: {}", args.device.display()))?;
+    let (cam_w, cam_h) = init(&dev)?;
 
-    let stream = UserptrStream::with_buffers(&dev, Type::VideoCapture, 4)
-        .expect("Failed to create UserptrStream");
+    let stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 4).wrap_err_with(|| {
+        format!(
+            "Failed to create MmapStream for device: {}",
+            args.device.display()
+        )
+    })?;
 
     let mut terminal = ratatui::init();
     let mut app = App::new(stream, cam_w, cam_h);
@@ -344,11 +351,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn init(dev: &Device) -> (u32, u32) {
-    let mut format = Capture::format(dev).expect("Failed to get format");
+fn init(dev: &Device) -> Result<(u32, u32)> {
+    let mut format = Capture::format(dev).wrap_err("Failed to get format")?;
     format.fourcc = v4l::FourCC::new(b"YUYV");
-    let format = Capture::set_format(dev, &format).expect("Failed to set format");
-    (format.width, format.height)
+    let format = Capture::set_format(dev, &format).wrap_err("Failed to set format")?;
+    Ok((format.width, format.height))
 }
 
 fn next_frame_safe<'a, S>(stream: &'a mut S) -> Result<Option<Vec<u8>>>

@@ -5,6 +5,9 @@
 
 A high-performance terminal-based live camera viewer written in Rust. It uses **Ratatui** for rendering, **v4l** for Linux camera capture.
 
+Inspired by the series "Doctor Who" ![Doctor Who: Maureen Lipman is The Wire](https://www.bbc.co.uk/staticarchive/ceacaaa66bb5e154f4f7f965f4b5349a283ed90e.jpg "Doctor Who: Maureen Lipman is The Wire")
+
+
 ## Features
 
 - **Multiple Render Modes**:
