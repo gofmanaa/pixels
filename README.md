@@ -24,12 +24,19 @@ Inspired by the series "Doctor Who" ![Doctor Who: Maureen Lipman is The Wire](ht
 
 ## Prerequisites
 
-On Linux, you need `libv4l-dev` installed:
+On Linux, you need `libv4l-dev` and fonts  installed:
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install libv4l-dev
+sudo apt update
+sudo apt install libv4l-dev
+sudo apt install fonts-noto-mono fonts-noto-cjk fonts-jetbrains-mono
+
+or 
+
+#Arch Linux
+sudo pacman -Syu
+sudo pacman -S libv4l v4l-utils noto-fonts noto-fonts-cjk ttf-jetbrains-mono
 ```
 
 ## Installation & Usage
