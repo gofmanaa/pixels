@@ -1,5 +1,7 @@
 <img src="camera.png" align="center" style="max-width:100%;"/>
 
+Matrix effect in terminal
+<img src="matrix.png" align="center" style="max-width:100%;"/>
 
 # Rust Terminal Camera Viewer
 
@@ -13,6 +15,7 @@ Inspired by the series "Doctor Who" ![Doctor Who: Maureen Lipman is The Wire](ht
 - **Multiple Render Modes**:
   - **Half-block mode**: Uses Unicode half-block `▀` characters for high-resolution color display.
   - **ASCII mode**: Maps camera feed to ASCII characters while retaining color.
+  - **Matrix mode**: Maps camera feed to ASCII Matrix move style.
 - **Real-time Filters**: Apply various color filters (Grayscale, Sepia, Invert, Vaporwave, etc.).
 - **Bilinear Sampling**: Smooth interpolation (Anti-aliasing) for better image quality.
 - **Screenshots**: Save the current frame as both an **ANSI-encoded text file** (preserving terminal colors) and a **PNG image**.
@@ -48,16 +51,16 @@ sudo apt-get install libv4l-dev
 
 ## Keyboard Controls
 
-| Key | Action |
-|-----|--------|
-| `q` | Quit application |
-| `a` | Toggle Render Mode (Half-block ↔ ASCII) |
-| `s` | Toggle Bilinear Sampling (Anti-aliasing) |
-| `p` | Save Screenshot (ANSI & PNG) |
-| `Space` | Toggle Pause/Live feed |
-| `c` | Toggle Stats Overlay |
-| `h` | Toggle Help Menu |
-| `1..0` | Switch between 10 different Color Filters |
+| Key     | Action                                      |
+|---------|---------------------------------------------|
+| `q`     | Quit application                            |
+| `a`     | Cycle Render Mode (Half-block/ASCII/Matrix) |
+| `s`     | Toggle Bilinear Sampling (Anti-aliasing)    |
+| `p`     | Save Screenshot (ANSI & PNG)                |
+| `Space` | Toggle Pause/Live feed                      |
+| `c`     | Toggle Stats Overlay                        |
+| `h`     | Toggle Help Menu                            |
+| `1..0`  | Switch between 10 different Color Filters   |
 
 ## Screenshots
 

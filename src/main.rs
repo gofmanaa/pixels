@@ -21,6 +21,7 @@ use v4l::video::Capture;
 
 use pixels::{
     filters::Filter,
+    matrix::MatrixState,
     render::{RenderMode, YuvLut, blend, sample_bilinear, to_ascii},
 };
 
@@ -44,11 +45,14 @@ struct App<'a> {
     // Pre-allocated strings for ASCII mode to avoid per-frame allocations
     ascii_strings: Vec<String>,
     consecutive_skips: u32,
+
+    matrix: MatrixState,
 }
 
 impl<'a> App<'a> {
-    fn new(stream: Stream<'a>, cam_w: u32, cam_h: u32) -> Self {
+    fn new(stream: Stream<'a>, cam_w: u32, cam_h: u32, term_w: u16, term_h: u16) -> Self {
         let ascii_strings = (0..=255u8).map(|c| (c as char).to_string()).collect();
+        let matrix = MatrixState::new(term_w, term_h);
 
         Self {
             stream: Some(stream),
@@ -67,6 +71,7 @@ impl<'a> App<'a> {
             quit: false,
             ascii_strings,
             consecutive_skips: 0,
+            matrix,
         }
     }
 
@@ -108,21 +113,21 @@ impl<'a> App<'a> {
                     if self.consecutive_skips > 30 {
                         // Re-init after too many skips
                         self.stream.take(); // Ensure old stream is dropped
-                        self.stream = Some(MmapStream::with_buffers(dev, Type::VideoCapture, 4)?);
+                        self.stream = Some(MmapStream::new(dev, Type::VideoCapture)?);
                         self.consecutive_skips = 0;
                     }
                 }
                 Err(_) => {
                     // Hard error, reinit stream
                     self.stream.take(); // Ensure old stream is dropped
-                    self.stream = Some(MmapStream::with_buffers(dev, Type::VideoCapture, 4)?);
+                    self.stream = Some(MmapStream::new(dev, Type::VideoCapture)?);
                     self.consecutive_skips = 0;
                 }
             }
         } else {
             // No stream? Try to create one
             self.stream.take(); // Ensure old stream is dropped
-            self.stream = Some(MmapStream::with_buffers(dev, Type::VideoCapture, 4)?);
+            self.stream = Some(MmapStream::new(dev, Type::VideoCapture)?);
             self.consecutive_skips = 0;
         }
         Ok(())
@@ -141,6 +146,8 @@ impl<'a> App<'a> {
             let cam_h = self.cam_h as usize;
 
             let scale_x = cam_w as f32 / term_w as f32;
+
+            let matrix = &mut self.matrix;
 
             let lines: Vec<Line> = match self.mode {
                 RenderMode::HalfBlock => {
@@ -196,6 +203,7 @@ impl<'a> App<'a> {
                         .into_par_iter()
                         .map(|ty| {
                             let spans: Vec<Span> = (0..term_w)
+                                .rev()
                                 .map(|tx| {
                                     let fx = tx as f32 * scale_x;
                                     let fy = ty as f32 * scale_y;
@@ -219,6 +227,10 @@ impl<'a> App<'a> {
                             Line::from(spans)
                         })
                         .collect()
+                }
+
+                RenderMode::Matrix => {
+                    matrix.render_lines(&self.frame, cam_w, cam_h, term_w, term_h, self.pause)
                 }
             };
 
@@ -257,7 +269,7 @@ impl<'a> App<'a> {
                     Line::from(" Keyboard Controls "),
                     Line::from("-------------------"),
                     Line::from(" q      : Quit"),
-                    Line::from(" a      : Toggle Render Mode (RGB/ASCII)"),
+                    Line::from(" a      : Toggle Render Mode (RGB/ASCII/Matrix)"),
                     Line::from(" s      : Toggle Bilinear Anti-aliasing"),
                     Line::from(" p      : Save Screenshot (ANSI & PNG)"),
                     Line::from(" Space  : Toggle Pause"),
@@ -294,7 +306,8 @@ impl<'a> App<'a> {
                     KeyCode::Char('a') => {
                         self.mode = match self.mode {
                             RenderMode::HalfBlock => RenderMode::Ascii,
-                            RenderMode::Ascii => RenderMode::HalfBlock,
+                            RenderMode::Ascii => RenderMode::Matrix,
+                            RenderMode::Matrix => RenderMode::HalfBlock,
                         };
                     }
                     KeyCode::Char('s') => self.is_sample_bilinear = !self.is_sample_bilinear,
@@ -339,7 +352,8 @@ fn main() -> Result<()> {
     })?;
 
     let mut terminal = ratatui::init();
-    let mut app = App::new(stream, cam_w, cam_h);
+    let size = terminal.size()?;
+    let mut app = App::new(stream, cam_w, cam_h, size.width, size.height);
 
     while !app.quit {
         app.update(&dev)?;

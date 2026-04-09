@@ -6,6 +6,7 @@ use rayon::prelude::*;
 pub enum RenderMode {
     HalfBlock, // default: "▀" fg=top bg=bottom  — 2 pixels per cell
     Ascii,     // 'a' toggle: ASCII ramp char, coloured, 1 pixel per cell
+    Matrix,    // Matrix effect
 }
 
 impl RenderMode {
@@ -13,6 +14,7 @@ impl RenderMode {
         match self {
             Self::HalfBlock => "RGB",
             Self::Ascii => "ASCII",
+            Self::Matrix => "Matrix",
         }
     }
 }
