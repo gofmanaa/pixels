@@ -291,7 +291,11 @@ impl MatrixState {
         // Warm up the edge curve LUT on first construction
         let _ = edge_curve();
         let columns = (0..term_w).map(|_| Column::new(term_h)).collect();
-        Self { columns, term_w, term_h }
+        Self {
+            columns,
+            term_w,
+            term_h,
+        }
     }
 
     /// Build ratatui `Line`s from the camera frame.
@@ -354,7 +358,6 @@ impl MatrixState {
         self.term_h = new_h;
     }
 }
-
 
 pub fn build_combined_map(
     frame: &[u32],
