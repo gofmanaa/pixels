@@ -99,8 +99,9 @@ impl<'a> App<'a> {
 
                     if self.is_sample_bilinear {
                         frame
-                            .par_iter_mut()
-                            .zip(self.prev_frame.par_iter())
+                            .iter_mut()
+                            //.par_iter_mut()
+                            .zip(self.prev_frame.iter())
                             .for_each(|(curr, prev)| {
                                 *curr = blend(*prev, *curr, 0.6);
                             });
@@ -153,7 +154,7 @@ impl<'a> App<'a> {
                 RenderMode::HalfBlock => {
                     let scale_y = cam_h as f32 / (term_h * 2) as f32;
                     (0..term_h)
-                        .into_par_iter()
+                        //.into_par_iter()
                         .map(|ty| {
                             let spans: Vec<Span> = (0..term_w)
                                 .rev()
@@ -200,7 +201,7 @@ impl<'a> App<'a> {
                 RenderMode::Ascii => {
                     let scale_y = cam_h as f32 / term_h as f32;
                     (0..term_h)
-                        .into_par_iter()
+                        //.into_par_iter()
                         .map(|ty| {
                             let spans: Vec<Span> = (0..term_w)
                                 .rev()
@@ -230,7 +231,18 @@ impl<'a> App<'a> {
                 }
 
                 RenderMode::Matrix => {
-                    matrix.render_lines(&self.frame, cam_w, cam_h, term_w, term_h, self.pause)
+                    let line = matrix.render_lines(
+                        &self.frame,
+                        &self.prev_frame,
+                        cam_w,
+                        cam_h,
+                        term_w,
+                        term_h,
+                        self.pause,
+                    );
+                    self.prev_frame.copy_from_slice(&self.frame);
+
+                    line
                 }
             };
 
@@ -331,7 +343,7 @@ impl<'a> App<'a> {
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[clap(short, long)]
+    #[clap(short, long, default_value = "/dev/video0")]
     device: PathBuf,
 }
 

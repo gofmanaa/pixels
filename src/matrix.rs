@@ -5,12 +5,14 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
-use rayon::prelude::*;
 use std::collections::VecDeque;
 
-// ---------------------------------------------------------------------------
+// CONFIG
+
+/// fade speed (lower = faster fade)
+const ENERGY_DECAY: u16 = 200;
+
 // Character set
-// ---------------------------------------------------------------------------
 
 const MATRIX_CHARS: &[char] = &[
     'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l',
@@ -26,10 +28,6 @@ const MATRIX_CHARS: &[char] = &[
 fn rand_matrix_char(rng: &mut SmallRng) -> char {
     MATRIX_CHARS[rng.random_range(0..MATRIX_CHARS.len())]
 }
-
-// ---------------------------------------------------------------------------
-// Edge map — computed once per frame at terminal resolution
-// ---------------------------------------------------------------------------
 
 /// BT.601 luma from packed 0x00RRGGBB
 #[inline(always)]
@@ -56,69 +54,13 @@ fn sample_cam(
     frame[cy * cam_w + cx]
 }
 
-/// Build a flat edge-strength map at terminal resolution (term_w × term_h).
-/// Values are 0..=255 (u8) - avoids f32 in the per-cell hot path.
-/// Sobel is applied on the already-downscaled luma grid, which is fast and
-/// avoids redundant camera fetches inside each Column::render call.
-pub fn build_edge_map(
-    frame: &[u32],
-    cam_w: usize,
-    cam_h: usize,
-    term_w: usize,
-    term_h: usize,
-) -> Vec<u8> {
-    // Step 1: build luma grid at terminal resolution in parallel
-    let luma_grid: Vec<i32> = (0..term_h * term_w)
-        .into_par_iter()
-        .map(|i| {
-            let tx = i % term_w;
-            let ty = i / term_w;
-            let px = sample_cam(frame, cam_w, cam_h, tx, ty, term_w, term_h);
-            luma_px(px)
-        })
-        .collect();
-
-    // Step 2: Sobel on the luma grid in parallel → u8 edge map
-    let get = |x: usize, y: usize| -> i32 {
-        let x = x.min(term_w.saturating_sub(1));
-        let y = y.min(term_h.saturating_sub(1));
-        luma_grid[y * term_w + x]
-    };
-
-    (0..term_h * term_w)
-        .into_par_iter()
-        .map(|i| {
-            let tx = i % term_w;
-            let ty = i / term_w;
-
-            let xm = tx.saturating_sub(1);
-            let xp = (tx + 1).min(term_w.saturating_sub(1));
-            let ym = ty.saturating_sub(1);
-            let yp = (ty + 1).min(term_h.saturating_sub(1));
-
-            let tl = get(xm, ym);
-            let tc = get(tx, ym);
-            let tr = get(xp, ym);
-            let ml = get(xm, ty);
-            let mr = get(xp, ty);
-            let bl = get(xm, yp);
-            let bc = get(tx, yp);
-            let br = get(xp, yp);
-
-            let gx = -tl - 2 * ml - bl + tr + 2 * mr + br;
-            let gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
-
-            // Integer sqrt approximation: use isqrt via u32 cast
-            let mag = ((gx * gx + gy * gy) as f32).sqrt();
-            // Normalise: 800 maps typical real-world edges to ~1.0
-            ((mag / 800.0).min(1.0) * 255.0) as u8
-        })
-        .collect()
+/// pixel difference
+#[inline(always)]
+fn diff_px(a: u32, b: u32) -> u8 {
+    let la = luma_px(a);
+    let lb = luma_px(b);
+    (la - lb).abs().min(255) as u8
 }
-
-// ---------------------------------------------------------------------------
-// Color — integer only, no powf in the hot path
-// ---------------------------------------------------------------------------
 
 /// Precomputed sharpening curve: maps edge u8 (0..=255) → blend factor u8.
 /// Equivalent to powf(e/255, 0.4) * 255, computed once at startup.
@@ -149,22 +91,24 @@ fn edge_curve() -> &'static EdgeCurve {
 /// Map cell age + edge strength (0..=255) → Matrix green Color.
 /// Flat areas: near-black. Edges: classic age-based green.
 #[inline(always)]
-fn matrix_color(age: u16, edge: u8) -> Color {
+fn matrix_color(age: u16, energy: u8) -> Color {
+    if energy > 200 {
+        return Color::Rgb(0, 255, 50);
+    }
+
     let (r_e, g_e, b_e): (u8, u8, u8) = match age {
-        0 => (220, 255, 220), // head  — near white
-        1 => (120, 250, 120), // neck  — bright green
-        2..=4 => (0, 200, 0), // upper trail
-        5..=9 => (0, 140, 0), // mid trail
-        _ => (0, 70, 0),      // deep tail
+        0 => (220, 255, 220),
+        1 => (120, 250, 120),
+        2..=4 => (0, 200, 0),
+        5..=9 => (0, 140, 0),
+        _ => (0, 110, 0),
     };
 
-    // Flat pole: nearly invisible
     const R_F: u8 = 0;
     const G_F: u8 = 50;
     const B_F: u8 = 0;
 
-    // t is the sharpened blend factor (0=flat, 255=full edge)
-    let t = edge_curve().get(edge) as u32;
+    let t = edge_curve().get(energy) as u32;
 
     let blend = |flat: u8, on_edge: u8| -> u8 {
         let f = flat as u32;
@@ -185,14 +129,13 @@ fn bg_color(edge: u8) -> Color {
     Color::Rgb(0, g, 0)
 }
 
-// ---------------------------------------------------------------------------
 // Cell / Drop / Column
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct Cell {
     ch: char,
     age: u16,
+    energy: u8,
 }
 
 struct Drop {
@@ -246,9 +189,17 @@ impl Column {
         self.wait = self.rng.random_range(2..self.height.max(3));
     }
 
-    fn tick(&mut self) {
-        for c in self.cells.iter_mut().flatten() {
-            c.age += 1;
+    fn tick(&mut self, col_idx: usize, combined_map: &[u8], term_w: usize) {
+        // decay existing cells
+        for (row, c) in self.cells.iter_mut().enumerate() {
+            if let Some(cell) = c {
+                cell.age += 1;
+                cell.energy = (cell.energy as u16 * ENERGY_DECAY / 255) as u8;
+
+                let idx = row * term_w + col_idx;
+                let motion = combined_map.get(idx).copied().unwrap_or(0);
+                cell.energy = cell.energy.max(motion);
+            }
         }
 
         let mut to_remove: Vec<usize> = Vec::new();
@@ -262,7 +213,9 @@ impl Column {
                     self.cells[row] = Some(Cell {
                         ch: drop.rand_char(),
                         age: 0,
+                        energy: 0,
                     });
+
                     if drop.row > 1 && drop.rng.random_bool(0.15) {
                         let lo = drop.row.saturating_sub(drop.length) as usize;
                         let hi = drop.row as usize;
@@ -303,23 +256,34 @@ impl Column {
     }
 
     /// Render using the pre-built edge map (no Sobel inside the hot path).
-    fn render(&self, col_idx: usize, edge_map: &[u8], term_w: usize) -> Vec<(char, Color, Color)> {
+    fn render(
+        &self,
+        col_idx: usize,
+        combined_map: &[u8],
+        term_w: usize,
+    ) -> Vec<(char, Color, Color)> {
         self.cells
             .iter()
             .enumerate()
             .map(|(row, slot)| {
-                let edge = edge_map.get(row * term_w + col_idx).copied().unwrap_or(0);
+                let edge = combined_map
+                    .get(row * term_w + col_idx)
+                    .copied()
+                    .unwrap_or(0);
                 let bg = bg_color(edge);
                 match slot {
-                    Some(c) => (c.ch, matrix_color(c.age, edge), bg),
+                    Some(c) => (c.ch, matrix_color(c.age, c.energy), bg),
                     None => (' ', bg, bg),
                 }
             })
             .collect()
     }
 }
+
 pub struct MatrixState {
     columns: Vec<Column>,
+    term_w: u16,
+    term_h: u16,
 }
 
 impl MatrixState {
@@ -327,38 +291,38 @@ impl MatrixState {
         // Warm up the edge curve LUT on first construction
         let _ = edge_curve();
         let columns = (0..term_w).map(|_| Column::new(term_h)).collect();
-        Self { columns }
-    }
-
-    fn tick(&mut self) {
-        self.columns
-            .par_iter_mut()
-            .for_each(|col: &mut Column| col.tick());
+        Self { columns, term_w, term_h }
     }
 
     /// Build ratatui `Line`s from the camera frame.
-    /// Edge map is computed once here in parallel, then reused per column.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_lines(
         &mut self,
         frame: &[u32],
+        prev_frame: &[u32],
         cam_w: usize,
         cam_h: usize,
         term_w: usize,
         term_h: usize,
         paused: bool,
     ) -> Vec<Line<'static>> {
-        if !paused {
-            self.tick();
-        }
-        // One parallel pass over the terminal grid -> edge map
-        let edge_map = build_edge_map(frame, cam_w, cam_h, term_w, term_h);
+        self.resize(term_w as u16, term_h as u16);
+        // build maps
+        let map = build_combined_map(frame, prev_frame, cam_w, cam_h, term_w, term_h);
 
-        // Render columns in parallel, each reading from the shared edge map
+        if !paused {
+            self.columns
+                .iter_mut()
+                .enumerate()
+                .for_each(|(i, col)| col.tick(i, &map, term_w));
+        }
+
+        // render
         let col_data: Vec<Vec<(char, Color, Color)>> = self
             .columns
-            .par_iter()
+            .iter()
             .enumerate()
-            .map(|(col_idx, col): (usize, &Column)| col.render(col_idx, &edge_map, term_w))
+            .map(|(col_idx, col)| col.render(col_idx, &map, term_w))
             .collect();
 
         (0..term_h)
@@ -378,4 +342,93 @@ impl MatrixState {
             })
             .collect()
     }
+
+    fn resize(&mut self, new_w: u16, new_h: u16) {
+        if new_w == self.term_w && new_h == self.term_h {
+            return;
+        }
+
+        self.columns = (0..new_w).map(|_| Column::new(new_h)).collect();
+
+        self.term_w = new_w;
+        self.term_h = new_h;
+    }
+}
+
+
+pub fn build_combined_map(
+    frame: &[u32],
+    prev_frame: &[u32],
+    cam_w: usize,
+    cam_h: usize,
+    term_w: usize,
+    term_h: usize,
+) -> Vec<u8> {
+    let mut out = vec![0u8; term_w * term_h];
+
+    // rolling luma rows (cache-friendly)
+    let mut row_prev = vec![0i32; term_w];
+    let mut row_curr = vec![0i32; term_w];
+    let mut row_next = vec![0i32; term_w];
+
+    // helper: fill one row
+    let fill_row = |row_buf: &mut [i32], ty: usize| {
+        for (tx, dst) in row_buf.iter_mut().enumerate() {
+            let px = sample_cam(frame, cam_w, cam_h, tx, ty, term_w, term_h);
+            *dst = luma_px(px);
+        }
+    };
+
+    // init first rows
+    fill_row(&mut row_curr, 0);
+    fill_row(&mut row_next, 1.min(term_h - 1));
+
+    for ty in 0..term_h {
+        // rotate rows (no realloc)
+        std::mem::swap(&mut row_prev, &mut row_curr);
+        std::mem::swap(&mut row_curr, &mut row_next);
+
+        if ty + 1 < term_h {
+            fill_row(&mut row_next, ty + 1);
+        }
+
+        for tx in 0..term_w {
+            let xm = tx.saturating_sub(1);
+            let xp = (tx + 1).min(term_w - 1);
+
+            // Sobel (from cached rows)
+            let tl = row_prev[xm];
+            let tc = row_prev[tx];
+            let tr = row_prev[xp];
+
+            let ml = row_curr[xm];
+            let mr = row_curr[xp];
+
+            let bl = row_next[xm];
+            let bc = row_next[tx];
+            let br = row_next[xp];
+
+            let gx = -tl - 2 * ml - bl + tr + 2 * mr + br;
+            let gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+
+            // let mag = ((gx * gx + gy * gy) as f32).sqrt();
+            // let edge = ((mag / 800.0).min(1.0) * 255.0) as u8;
+            // optimization
+            let mag = (gx * gx + gy * gy) as u32;
+            let edge = ((mag >> 12).min(255)) as u8;
+
+            // motion (inline, no extra pass)
+            let a = sample_cam(frame, cam_w, cam_h, tx, ty, term_w, term_h);
+            let b = sample_cam(prev_frame, cam_w, cam_h, tx, ty, term_w, term_h);
+            let motion = diff_px(a, b);
+
+            // combine
+            let boosted = (motion as u16 * 2).min(255) as u8;
+            let combined = edge.max(boosted);
+
+            out[ty * term_w + tx] = combined;
+        }
+    }
+
+    out
 }
