@@ -1,7 +1,4 @@
-<img src="camera.png" align="center" style="max-width:100%;"/>
-
-Matrix effect in terminal
-<img src="matrix.png" align="center" style="max-width:100%;"/>
+# Pixels
 
 # Rust Terminal Camera Viewer
 
@@ -9,6 +6,18 @@ A high-performance terminal-based live camera viewer written in Rust. It uses **
 
 Inspired by the series "Doctor Who" ![Doctor Who: Maureen Lipman is The Wire](https://www.bbc.co.uk/staticarchive/ceacaaa66bb5e154f4f7f965f4b5349a283ed90e.jpg "Doctor Who: Maureen Lipman is The Wire")
 
+#### Matrix effect in terminal
+
+<img src="matrix.png" align="center" style="max-width:100%;"/>
+
+#### Black and white effect
+
+<img src="camera.png" align="center" style="max-width:100%;"/>
+
+
+#### ASCII effect
+
+<img src="ascii.png" align="center" style="max-width:100%;"/>
 
 ## Features
 
