@@ -1,8 +1,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use pixels::MatrixState;
 use pixels::filters::Filter;
 use pixels::render::{YuvLut, sample_bilinear};
 use std::hint::black_box;
-use pixels::MatrixState;
 
 fn bench_filters(c: &mut Criterion) {
     let mut group = c.benchmark_group("filters");
@@ -68,7 +68,15 @@ fn bench_matrix(c: &mut Criterion) {
 
     c.bench_function("matrix", |b| {
         b.iter(|| {
-            matrix.render_lines(black_box(&frame), black_box(&prev_frame), cam_w, cam_h, width, height, false);
+            matrix.render_lines(
+                black_box(&frame),
+                black_box(&prev_frame),
+                cam_w,
+                cam_h,
+                width,
+                height,
+                false,
+            );
         })
     });
 }
