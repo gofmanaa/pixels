@@ -10,9 +10,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use rayon::prelude::*;
-use std::path::PathBuf;
 use std::time::Duration;
+use std::{path::PathBuf, time::Instant};
 use v4l::buffer::Type;
 use v4l::io::mmap::Stream;
 use v4l::io::traits::CaptureStream;
@@ -47,6 +46,8 @@ struct App<'a> {
     consecutive_skips: u32,
 
     matrix: MatrixState,
+
+    fps: u32,
 }
 
 impl<'a> App<'a> {
@@ -72,6 +73,7 @@ impl<'a> App<'a> {
             ascii_strings,
             consecutive_skips: 0,
             matrix,
+            fps: 0,
         }
     }
 
@@ -90,8 +92,11 @@ impl<'a> App<'a> {
 
                     // Parallel YUYV -> packed RGB decode
                     frame
-                        .par_chunks_mut(2)
-                        .zip(buf.par_chunks_exact(4_usize))
+                        // Parallel add disinchronize artifacts
+                        .chunks_mut(2)
+                        //.par_chunks_mut(2)
+                        //.zip(buf.par_chunks_exact(4_usize))
+                        .zip(buf.chunks_exact(4))
                         .for_each(|(out, chunk)| {
                             out[0] = lut.lookup(chunk[0], chunk[1], chunk[3]);
                             out[1] = lut.lookup(chunk[2], chunk[1], chunk[3]);
@@ -99,11 +104,16 @@ impl<'a> App<'a> {
 
                     if self.is_sample_bilinear {
                         frame
+                            // Parallel add disinchronize artifacts
+                            //.par_chunks_mut(2)
                             .iter_mut()
-                            //.par_iter_mut()
+                            //.zip(self.prev_frame.par_chunks_mut(2))
                             .zip(self.prev_frame.iter())
                             .for_each(|(curr, prev)| {
                                 *curr = blend(*prev, *curr, 0.6);
+
+                                //curr[0] = blend(prev[0], curr[0], 0.6);
+                                //curr[1] = blend(prev[1], curr[1], 0.6);
                             });
                         self.prev_frame.copy_from_slice(frame);
                     }
@@ -256,11 +266,12 @@ impl<'a> App<'a> {
 
             if self.show_overlay {
                 let label = format!(
-                    " {} │ {} │ AA:{} │ {} │ 'h' help ",
+                    " {} │ {} │ AA:{} │ {} │ 'h' help | FPS: {}",
                     self.mode.label(),
                     self.filter.name(),
                     if self.is_sample_bilinear { "ON" } else { "OFF" },
-                    if self.pause { "PAUSED" } else { "LIVE" }
+                    if self.pause { "PAUSED" } else { "LIVE" },
+                    self.fps,
                 );
                 let badge = Rect {
                     x: 1,
@@ -367,8 +378,21 @@ fn main() -> Result<()> {
     let size = terminal.size()?;
     let mut app = App::new(stream, cam_w, cam_h, size.width, size.height);
 
+    // FPS state
+    let mut frames_count: u32 = 0;
+    let mut last_fps_update = Instant::now();
+
     while !app.quit {
         app.update(&dev)?;
+
+        frames_count += 1;
+
+        if last_fps_update.elapsed() >= Duration::from_secs(1) {
+            app.fps = frames_count;
+            frames_count = 0;
+            last_fps_update = Instant::now();
+        }
+
         app.draw(&mut terminal)?;
         app.handle_events()?;
     }

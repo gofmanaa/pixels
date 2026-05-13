@@ -53,6 +53,7 @@ impl YuvLut {
     pub fn build() -> Self {
         let mut table = vec![0u32; 256 * 256 * 256].into_boxed_slice();
         // Parallelize LUT construction across all (y, u, v) triples
+        // bench 385.73 µs
         table
             .par_chunks_mut(256 * 256)
             .enumerate()
@@ -69,10 +70,25 @@ impl YuvLut {
                     }
                 }
             });
-        // let raw = Box::into_raw(table) as *mut [u32; 256 * 256 * 256];
-        // Self {
-        //     table: unsafe { Box::from_raw(raw) },
+
+        // bench 436.53 µs
+        // let mut index = 0;
+        //
+        // for y in 0..256 {
+        //     let yi = y as i32;
+        //     for u in 0..256 {
+        //         let ui = u as i32 - 128;
+        //         for v in 0..256 {
+        //             let vi = v as i32 - 128;
+        //             let r = (yi + ((1436 * vi) >> 10)).clamp(0, 255) as u32;
+        //             let g = (yi - ((352 * ui + 731 * vi) >> 10)).clamp(0, 255) as u32;
+        //             let b = (yi + ((1814 * ui) >> 10)).clamp(0, 255) as u32;
+        //             table[index] = (r << 16) | (g << 8) | b;
+        //             index += 1;
+        //         }
+        //     }
         // }
+
         Self { table }
     }
 

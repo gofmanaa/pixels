@@ -34,8 +34,20 @@ fn bench_filters(c: &mut Criterion) {
 
 fn bench_yuv_lookup(c: &mut Criterion) {
     let lut = YuvLut::build();
+
+    let buf = vec![128u8; 640 * 480 * 2];
+    let mut frame = vec![0u32; 640 * 480];
+
     c.bench_function("yuv_lookup", |b| {
-        b.iter(|| lut.lookup(black_box(128), black_box(128), black_box(128)))
+        //b.iter(|| lut.lookup(black_box(128), black_box(128), black_box(128)))
+        b.iter(|| {
+            for (out, chunk) in frame.chunks_mut(2).zip(buf.chunks_exact(4)) {
+                out[0] = lut.lookup(chunk[0], chunk[1], chunk[3]);
+                out[1] = lut.lookup(chunk[2], chunk[1], chunk[3]);
+            }
+
+            black_box(&frame);
+        });
     });
 }
 
